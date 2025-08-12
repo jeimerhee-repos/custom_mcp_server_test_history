@@ -1,0 +1,23 @@
+function jsonUnescape(str) {
+    return str
+        .replace(/\\\\/g, '\\')  // \\ -> \
+        .replace(/\\"/g, '"')    // \" -> "
+        .replace(/\\n/g, '\n')   // \n -> 개행문자
+        .replace(/\\r/g, '\r')   // \r -> 캐리지리턴
+        .replace(/\\t/g, '\t');  // \t -> 탭
+}
+
+try {
+    console.log('$args: ', $args);
+    const jsonObject = JSON.parse($args);
+
+    console.log('jsonObject: ', jsonObject);
+  
+    const text = await jsonUnescape(jsonObject.text);
+
+    console.log('text: ', text);
+    return text;
+} catch (error) {
+    console.error(error);
+    return '';
+}

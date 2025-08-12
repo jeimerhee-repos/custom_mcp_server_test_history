@@ -1,0 +1,205 @@
+services:
+  # UI
+  pi-detector-all-in-app-ui:
+    container_name: pi-detector-all-in-app-ui
+    build:
+      context: ../
+      dockerfile: ./docker/ui.DockerFile
+      args:
+        VITE_PII_DETECTOR_API_ENDPOINT: ${VITE_PII_DETECTOR_API_ENDPOINT}
+    links:
+      - pi-detector-all-in-app-api
+    depends_on:
+      - pi-detector-all-in-app-api
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - all-in.env
+    restart: unless-stopped
+    expose:
+      - 80
+    ports:
+      - '3000:80'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - flowise_network
+  
+  # app
+  pi-detector-all-in-app-api:
+    container_name: pi-detector-all-in-app-api
+    build:
+      context: ../
+      dockerfile: ./docker/api.DockerFile
+    depends_on:
+      - pi-detector-all-in-postgres
+      - pi-detector-all-in-rabbitmq
+      - pi-detector-all-in-nginx
+    links:
+      - pi-detector-all-in-postgres
+      - pi-detector-all-in-rabbitmq
+      - pi-detector-all-in-nginx
+      - pi-detector-all-in-pgadmin
+      - pi-detector-all-in-ollama-puller
+      - pi-detector-all-in-elasticsearch
+      - pi-detector-all-in-kibana
+    env_file:
+      - ./all-in.env
+    expose:
+      - 80
+    ports:
+      - '8888:80'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - flowise_network
+  
+  # Ollama Inference Workers
+  pi-detector-all-in-ollama1:
+    image: ollama/ollama:latest
+    container_name: pi-detector-all-in-ollama1
+    expose:
+      - 11434
+    volumes:
+      - ./temp/pi-detector-all-in/ollama_storage_1:/code
+      - ./temp/pi-detector-all-in/ollama_storage_1/ollama/ollama:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    networks:
+      - flowise_network
+
+  pi-detector-all-in-ollama-puller:
+    image: curlimages/curl:latest
+    container_name: pi-detector-all-in-ollama-puller
+    depends_on:
+      - pi-detector-all-in-ollama1
+    env_file:
+      - ./all-in.env
+    entrypoint: >
+      sh -c '
+        env
+        echo "Waiting for pi-detector-all-in-ollama1...";
+        until curl -s http://pi-detector-all-in-ollama1:11434; do sleep 2; done;
+
+        echo "Pulling $$LLM_MODEL on pi-detector-all-in-ollama1...";
+        curl -s http://pi-detector-all-in-ollama1:11434/api/pull -H "Content-Type: application/json" -d "{\"name\": \"$$LLM_MODEL\"}";
+
+        curl -s http://pi-detector-all-in-ollama1:11434/api/generate -H "Content-Type: application/json" -d "{\"model\":\"$$LLM_MODEL\",\"prompt\":\"Hello\",\"stream\":false}" > /dev/null;
+      '
+    restart: 'no'
+    networks:
+      - flowise_network
+  
+  # PostgreSQL (internal only)
+  pi-detector-all-in-postgres:
+    image: postgres:15
+    container_name: pi-detector-all-in-postgres
+    environment:
+      POSTGRES_USER: ollama_user
+      POSTGRES_PASSWORD: ollama_pass
+    volumes:
+      - pII-guard_pg:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - flowise_network
+
+  # pgAdmin Web UI (accessible from host)
+  pi-detector-all-in-pgadmin:
+    container_name: pi-detector-all-in-pgadmin
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - '5050:80'
+    volumes:
+      - ./all-in.configs/pgadmin-servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      - pi-detector-all-in-postgres
+    restart: unless-stopped
+    networks:
+      - flowise_network
+
+  # RabbitMQ with UI (accessible from host)
+  pi-detector-all-in-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: pi-detector-all-in-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ollama
+      RABBITMQ_DEFAULT_PASS: ollama
+    expose:
+      - 5672
+      - 15672
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:15672/api/healthchecks/node"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - flowise_network
+
+  # NGINX Load Balancer (public endpoint for Ollama)
+  pi-detector-all-in-nginx:
+    image: nginx:stable
+    container_name: pi-detector-all-in-ollama-nginx
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./all-in.configs/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - pi-detector-all-in-ollama1
+    restart: unless-stopped
+    networks:
+      - flowise_network
+
+  pi-detector-all-in-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: pi-detector-all-in-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    volumes:
+      - ./temp/pi-detector-all-in/elasticsearch:/usr/share/elasticsearch/data
+    restart: unless-stopped
+    expose:
+      - '9200' # internal only
+    networks:
+      - flowise_network
+
+  pi-detector-all-in-kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: pi-detector-all-in-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://pi-detector-all-in-elasticsearch:9200
+      - xpack.security.enabled=false
+    depends_on:
+      - pi-detector-all-in-elasticsearch
+    ports:
+      - '5601:5601'
+    restart: unless-stopped
+    networks:
+      - flowise_network
+
+networks:
+  flowise_network:
+    external: true
+
+volumes:
+  pII-guard_pg:
+    external: true
